@@ -2,8 +2,8 @@ name: 行情警报
 
 on:
   schedule:
-    # UTC 时间。13-21 点覆盖美股夏令时(13:30-20:00)和冬令时(14:30-21:00)
-    # 脚本内部再用美东时区精确判断是否开盘，所以不受夏令时切换影响
+    # UTC。13-21 点覆盖美股夏令时(13:30-20:00)与冬令时(14:30-21:00)
+    # 脚本内部用 CNBC 的 curmktstatus 精确判断是否盘中，并在临近开盘时等待
     - cron: "*/5 13-21 * * 1-5"
   workflow_dispatch:
     inputs:
@@ -23,30 +23,35 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - name: 运行检查
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
-          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
-          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
           MODE: ${{ inputs.mode }}
         run: |
           case "$MODE" in
-            check) python3 price_alert.py --check ;;
-            force) python3 price_alert.py --force ;;
-            *)     python3 price_alert.py ;;
+            check) python3 alert.py --check ;;
+            force) python3 alert.py --force --once ;;
+            *)     python3 alert.py ;;
           esac
 
       - name: 提交状态变更
+        if: always()
         run: |
-          if [ -n "$(git status --porcelain state.json)" ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add state.json
-            git commit -m "chore: 更新警报状态"
-            git push
-          else
-            echo "状态无变化，无需提交"
+          if [ -z "$(git status --porcelain state.json)" ]; then
+            echo "状态无变化，无需提交"; exit 0
           fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "chore: 更新警报状态"
+          for i in 1 2 3; do
+            if git push; then echo "推送成功"; exit 0; fi
+            echo "推送冲突，第 $i 次重试…"
+            git pull --rebase --autostash || true
+            sleep 3
+          done
+          echo "::warning::状态提交失败，可能导致下次重复推送一条"
