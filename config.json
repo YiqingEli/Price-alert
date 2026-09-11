@@ -1,0 +1,12 @@
+{
+  "watches": [
+    {
+      "name": "QQQ",
+      "symbol": "QQQ",
+      "asset_class": "etf",
+      "indicator": "rsi",
+      "period": 6,
+      "below": 22
+    }
+  ]
+}
