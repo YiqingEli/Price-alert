@@ -1,12 +1,10 @@
 {
-  "watches": [
-    {
-      "name": "QQQ",
-      "symbol": "QQQ",
-      "asset_class": "etf",
-      "indicator": "rsi",
-      "period": 6,
-      "below": 22
-    }
-  ]
+  "tiers": [
+    { "name": "一档", "label": "加仓", "vix": 25, "fng": 20, "rsi": 30, "drop": 2.0 },
+    { "name": "二档", "label": "抄底", "vix": 33, "fng": 10, "rsi": 22, "drop": 3.0 }
+  ],
+  "rsi_period": 6,
+  "loop_seconds": 240,
+  "poll_interval": 60,
+  "wait_open_window": 8
 }
