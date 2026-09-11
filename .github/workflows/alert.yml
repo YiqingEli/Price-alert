@@ -1,0 +1,52 @@
+name: 行情警报
+
+on:
+  schedule:
+    # UTC 时间。13-21 点覆盖美股夏令时(13:30-20:00)和冬令时(14:30-21:00)
+    # 脚本内部再用美东时区精确判断是否开盘，所以不受夏令时切换影响
+    - cron: "*/5 13-21 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式"
+        type: choice
+        options: [check, normal, force]
+        default: check
+
+permissions:
+  contents: write
+
+concurrency:
+  group: price-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 运行检查
+        env:
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          case "$MODE" in
+            check) python3 price_alert.py --check ;;
+            force) python3 price_alert.py --force ;;
+            *)     python3 price_alert.py ;;
+          esac
+
+      - name: 提交状态变更
+        run: |
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore: 更新警报状态"
+            git push
+          else
+            echo "状态无变化，无需提交"
+          fi
