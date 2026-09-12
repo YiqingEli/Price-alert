@@ -33,6 +33,7 @@ CNN_HDR  = {"Accept": "application/json", "Referer": "https://edition.cnn.com/ma
 NSDQ_HDR = {"Accept": "application/json"}
 
 ROWS = ("波动", "恐慌", "强弱", "纳指", "标普")   # 显示顺序，全为两个汉字以保证对齐
+_ALLMISS = 0                                      # 连续全缺次数，防开盘瞬间误报
 _HIST_CACHE = {}                                  # 日线历史一个任务内只取一次
 
 
@@ -62,8 +63,9 @@ def parse_ts(s):
     s = str(s).strip().replace("Z", "+00:00")
     m = re.match(r"^(.*[+-]\d{2})(\d{2})$", s)
     if m: s = m.group(1) + ":" + m.group(2)
-    try: return datetime.fromisoformat(s)
+    try: t = datetime.fromisoformat(s)
     except ValueError: return None
+    return t if t.tzinfo else t.replace(tzinfo=ET)   # 无时区者按美东解释
 
 
 def num(s):
@@ -102,8 +104,10 @@ def fetch_cnbc():
     except Exception as e:
         log(f"  CNBC 请求失败: {type(e).__name__} {e}"); return out, None
     for x in rows:
-        status = status or x.get("curmktstatus")
-        out[x.get("symbol", "")] = {"last": num(x.get("last")),
+        sym = x.get("symbol", "")
+        if sym in ("QQQ", "SPY") and not status:
+            status = x.get("curmktstatus")           # 只以股票为准
+        out[sym] = {"last": num(x.get("last")),
                                     "prev": num(x.get("previous_day_closing")),
                                     "chg_src": num(x.get("change_pct")),
                                     "ts": parse_ts(x.get("last_time"))}
@@ -163,7 +167,7 @@ def fetch_daily_closes(sym, today):
 
 
 # ───────────────────────── 采集 ─────────────────────────
-def gather(rsi_period=6):
+def gather(rsi_period=6, require_today=True):
     today = datetime.now(ET).date()
     cnbc, mkt = fetch_cnbc()
     fg, cnn_vix = fetch_cnn()
@@ -176,10 +180,10 @@ def gather(rsi_period=6):
     if not (vix.ok and vix.fresh_today(today)):
         if cnn_vix.ok and cnn_vix.fresh_today(today):
             cnn_vix.note = "实时数据缺失"; vix = cnn_vix
-        else:
+        elif require_today:
             vix = Reading()
 
-    if not (fg.ok and fg.fresh_today(today)):
+    if not (fg.ok and fg.fresh_today(today)) and require_today:
         fg = Reading()
 
     # 价格：CNBC 优先，退 Nasdaq（Nasdaq 无昨收，借用 CNBC 的）
@@ -193,7 +197,7 @@ def gather(rsi_period=6):
             else:
                 prices[label] = Reading(); continue
         r = Reading(q["last"], q["ts"], src)
-        if not r.fresh_today(today) or not q["prev"]:
+        if not q["prev"] or (require_today and not r.fresh_today(today)):
             prices[label] = Reading(); continue
         r.prev = q["prev"]
         r.drop = (q["last"] / q["prev"] - 1) * 100
@@ -305,8 +309,11 @@ def seconds_to_open():
 
 
 # ───────────────────────── 主流程 ─────────────────────────
-def check_once(cfg, state, dry=False):
+def check_once(cfg, state, dry=False, force=False):
     data = gather(cfg.get("rsi_period", 6))
+    if not force and not market_open(data["mkt"]):
+        log(f"  非交易时段(status={data['mkt']})，跳过本轮判定")
+        return data["mkt"]
     tiers = cfg["tiers"]
     t1, t2 = judge(data, tiers[0]), judge(data, tiers[1])
     p = data["prices"]
@@ -316,11 +323,16 @@ def check_once(cfg, state, dry=False):
         f"纳指 {p.get('纳指',Reading()).drop and round(p['纳指'].drop,2)}% "
         f"标普 {p.get('标普',Reading()).drop and round(p['标普'].drop,2)}%")
 
+    global _ALLMISS
     if t1[1] == 0 and t2[1] == 0:
+        _ALLMISS += 1
+        if _ALLMISS < 2:
+            log("  本轮全部数据缺失，等下一轮确认后再告警"); return data["mkt"]
         if not state.get("datafail"):
             bark("⚠️ 行情数据源全部失败", "波动/恐慌/强弱/价格四项均取不到数据，警报暂时失效。", dry)
             state["datafail"] = True
         return data["mkt"]
+    _ALLMISS = 0
     state["datafail"] = False
 
     active = 2 if t2[0] >= 1 else (1 if t1[0] >= 1 else 0)
@@ -348,16 +360,23 @@ def main():
     before = json.dumps(state, sort_keys=True)
 
     if "--check" in args:
-        d = gather(cfg.get("rsi_period", 6))
-        log(f"市场状态={d['mkt']}")
-        log(f"  波动 {d['vix'].value} ({d['vix'].source or '无数据'})")
-        log(f"  恐慌 {d['fg'].value} ({d['fg'].source or '无数据'})")
-        log(f"  强弱 RSI(6) {d['rsi'].value and round(d['rsi'].value,2)} ({d['rsi'].source or '无数据'})")
+        d = gather(cfg.get("rsi_period", 6), require_today=False)
+        now_et = datetime.now(ET)
+        def age(r):
+            if not r.ok: return "✗ 取不到"
+            if r.ts is None: return "✓ 无时间戳"
+            mins = (now_et - r.ts.astimezone(ET)).total_seconds() / 60
+            fresh = "今日" if r.ts.astimezone(ET).date() == now_et.date() else "非今日"
+            return f"✓ {r.ts.astimezone(ET):%m-%d %H:%M} ({fresh}, {mins:.0f}分钟前)"
+        log(f"市场状态 = {d['mkt']}   (非 REG_MKT 时不做判定，属正常)")
+        log(f"  波动 VIX      {d['vix'].value}   {age(d['vix'])}  [{d['vix'].source or '-'}]")
+        log(f"  恐慌 F&G      {d['fg'].value and round(d['fg'].value,1)}   {age(d['fg'])}  [{d['fg'].source or '-'}]")
+        log(f"  强弱 RSI(6)   {d['rsi'].value and round(d['rsi'].value,2)}   {age(d['rsi'])}  [{d['rsi'].source or '-'}]")
         for k, r in d["prices"].items():
-            log(f"  {k} {r.value} 昨收{r.prev} {r.drop and round(r.drop,2)}% ({r.source or '无数据'})")
+            log(f"  {k}          {r.value}  昨收 {r.prev}  {r.drop and round(r.drop,2)}%   {age(r)}  [{r.source or '-'}]")
         ok = sum(1 for x in (d['vix'], d['fg'], d['rsi']) if x.ok) + sum(1 for r in d['prices'].values() if r.ok)
-        bark("✅ 警报系统体检", f"市场状态 {d['mkt']}｜{ok}/5 项数据正常", dry, level="active")
-        return 0
+        bark("✅ 警报系统体检", f"{ok}/5 项数据源可达｜市场状态 {d['mkt']}", dry, level="active")
+        return 0 if ok == 5 else 1
 
     _, mkt = fetch_cnbc()
     if not market_open(mkt) and "--force" not in args:
@@ -365,6 +384,9 @@ def main():
         if 0 < gap <= cfg.get("wait_open_window", 8) * 60:
             log(f"距开盘 {gap/60:.1f} 分钟，等待中…")
             time.sleep(gap)
+            _, mkt = fetch_cnbc()                      # 等完再确认一次
+            if not market_open(mkt):
+                log(f"等待结束但市场未开(status={mkt})，应为休市日，退出"); return 0
         else:
             log(f"非交易时段(status={mkt})，跳过"); return 0
 
@@ -375,7 +397,7 @@ def main():
         log(f"第 {n} 轮")
         status = None
         try:
-            status = check_once(cfg, state, dry)
+            status = check_once(cfg, state, dry, force="--force" in args)
         except Exception as e:
             log(f"  本轮异常: {type(e).__name__} {e}")
         if time.time() >= deadline: break
