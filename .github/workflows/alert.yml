@@ -10,7 +10,7 @@ on:
       mode:
         description: "运行模式"
         type: choice
-        options: [check, normal, force]
+        options: [check, demo, normal, force]
         default: check
 
 permissions:
@@ -34,6 +34,7 @@ jobs:
         run: |
           case "$MODE" in
             check) python3 alert.py --check ;;
+            demo)  python3 alert.py --demo ;;
             force) python3 alert.py --force --once ;;
             *)     python3 alert.py ;;
           esac
