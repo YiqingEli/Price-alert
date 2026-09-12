@@ -359,6 +359,18 @@ def main():
         state = {"date": today, "tier1_max": 0, "tier2_max": 0, "datafail": False}
     before = json.dumps(state, sort_keys=True)
 
+    if "--demo" in args:
+        now = datetime.now(ET)
+        def R(v, drop=None):
+            r = Reading(v, now, "演示"); r.prev = v; r.drop = drop; return r
+        demo = {"vix": R(35.2), "fg": R(12), "rsi": R(21.0),
+                "prices": {"纳指": R(612.40, -3.81), "标普": R(698.15, -3.14)},
+                "mkt": "REG_MKT", "today": now.date()}
+        t1, t2 = judge(demo, cfg["tiers"][0]), judge(demo, cfg["tiers"][1])
+        title, body = build_message(demo, t1, t2, cfg["tiers"], 2)
+        bark("【演示】" + title, body + "\n\n※ 这是模拟数据，非真实信号", dry, level="active")
+        return 0
+
     if "--check" in args:
         d = gather(cfg.get("rsi_period", 6), require_today=False)
         now_et = datetime.now(ET)
