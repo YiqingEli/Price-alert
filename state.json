@@ -1,6 +1,6 @@
 {
-  "date": "2026-10-16",
-  "tier1_max": 0,
-  "tier2_max": 1,
+  "date": "2026-10-22",
+  "tier1_max": 3,
+  "tier2_max": 0,
   "datafail": false
 }
